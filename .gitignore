@@ -1,0 +1,24 @@
+# Python build / install artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Editor / OS cruft
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Runtime state written outside the repo normally, but guard anyway
+sessions.json
+.openclaw-weixin-python/
+.wechat-claude-bridge/

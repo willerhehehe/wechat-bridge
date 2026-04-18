@@ -33,6 +33,33 @@ def cmd_login(_args: argparse.Namespace) -> int:
     return weixin_main(["login"])
 
 
+def _resolve_account_id(provided: str | None) -> str | None:
+    """If the user didn't pass --account-id, auto-pick the sole stored account.
+
+    Returns the resolved id, or None (caller prints the error) if ambiguous or empty.
+    """
+    if provided:
+        return provided
+    try:
+        from weixin_sdk.store import StateStore
+    except ImportError:
+        return None
+    accounts = StateStore().list_accounts()
+    if len(accounts) == 1:
+        LOG.info("using account=%s (only one stored)", accounts[0].account_id)
+        return accounts[0].account_id
+    if not accounts:
+        print(
+            "No WeChat account stored. Run `wechat-claude-bridge login` first.",
+            file=sys.stderr,
+        )
+        return None
+    print("Multiple accounts stored — pick one with --account-id:", file=sys.stderr)
+    for acct in accounts:
+        print(f"  {acct.account_id}", file=sys.stderr)
+    return None
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     try:
         from weixin_sdk.client import AccountClient
@@ -42,8 +69,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         print("run `wechat-claude-bridge login` first (re-run install.sh if needed).", file=sys.stderr)
         return 1
 
+    account_id = _resolve_account_id(args.account_id)
+    if not account_id:
+        return 1
+    args.account_id = account_id
+
     try:
-        acct = AccountClient.from_store(args.account_id)
+        acct = AccountClient.from_store(account_id)
     except WeixinError as e:
         LOG.error("account load failed: %s", e)
         LOG.error("run `wechat-claude-bridge login` first")
@@ -99,7 +131,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub_login.set_defaults(func=cmd_login)
 
     sub_run = sub.add_parser("run", help="Start the bridge loop (default command)")
-    sub_run.add_argument("--account-id", required=True, help="weixin-sdk account id")
+    sub_run.add_argument(
+        "--account-id",
+        default=None,
+        help="weixin-sdk account id (omit to auto-use the only stored account)",
+    )
     sub_run.add_argument("--model", default="claude-sonnet-4-6", help="Claude model (default: claude-sonnet-4-6)")
     sub_run.add_argument(
         "--session-file",
@@ -119,8 +155,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    # Default to `run` if no subcommand is given and --help isn't requested.
-    if argv and argv[0] not in {"login", "run", "-h", "--help", "--version"}:
+    # Default to `run` when no subcommand is given (including bare invocation)
+    # and --help/--version isn't requested.
+    if not argv or argv[0] not in {"login", "run", "-h", "--help", "--version"}:
         argv = ["run", *argv]
 
     parser = build_parser()

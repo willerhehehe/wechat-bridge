@@ -36,12 +36,15 @@ pip install .
 ## Use
 
 ```bash
-wechat-claude-bridge login                            # scan the QR on your phone (one time)
-wechat-claude-bridge --account-id bot-xxxxxxxx        # start the bridge (sonnet-4-6)
-wechat-claude-bridge --account-id bot-xxxxxxxx --model claude-opus-4-7     # switch model
-wechat-claude-bridge --account-id bot-xxxxxxxx --allowed-users u1@im.wechat,u2@im.wechat
-wxcc --account-id bot-xxxxxxxx                        # short alias
+wechat-claude-bridge login                 # prints a QR right in the terminal — scan with WeChat
+wechat-claude-bridge                       # no args: auto-use the stored account (sonnet-4-6)
+wechat-claude-bridge --model claude-opus-4-7       # switch model
+wechat-claude-bridge --allowed-users u1@im.wechat,u2@im.wechat
+wxcc                                       # short alias, same defaults
 ```
+
+If you've logged in multiple bots, pass `--account-id <bot_id>` to pick one —
+the CLI lists stored accounts when it can't decide.
 
 `wechat-claude-bridge --help` / `wechat-claude-bridge run --help` for every flag.
 
@@ -81,7 +84,7 @@ Key properties:
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--account-id` | *(required)* | weixin-sdk bot account id |
+| `--account-id` | *(auto-pick if only one stored)* | weixin-sdk bot account id |
 | `--model` | `claude-sonnet-4-6` | Claude model |
 | `--session-file` | `~/.wechat-claude-bridge/sessions.json` | Per-user session map |
 | `--system-prompt` | (concise WeChat bot prompt) | Appended to Claude's system prompt |

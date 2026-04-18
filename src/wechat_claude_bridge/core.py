@@ -24,15 +24,14 @@ def save_session_map(path: Path, sessions: dict[str, str]) -> None:
     path.write_text(json.dumps(sessions, ensure_ascii=False, indent=2))
 
 
-def claude_respond(
+def _run_claude_once(
     prompt: str,
     session_id: str | None,
     *,
     model: str | None,
     system_prompt: str | None,
-    timeout_s: float = 300.0,
-) -> tuple[str, str | None]:
-    """Invoke `claude --print` in JSON output mode and return (reply, session_id)."""
+    timeout_s: float,
+) -> subprocess.CompletedProcess[str] | None:
     args: list[str] = [
         "claude",
         "--print",
@@ -49,14 +48,49 @@ def claude_respond(
     args.append(prompt)
     LOG.info("claude run session=%s prompt=%r", session_id, prompt[:80])
     try:
-        proc = subprocess.run(
-            args, capture_output=True, text=True, timeout=timeout_s
-        )
+        return subprocess.run(args, capture_output=True, text=True, timeout=timeout_s)
     except subprocess.TimeoutExpired:
+        return None
+
+
+def claude_respond(
+    prompt: str,
+    session_id: str | None,
+    *,
+    model: str | None,
+    system_prompt: str | None,
+    timeout_s: float = 300.0,
+) -> tuple[str, str | None]:
+    """Invoke `claude --print` in JSON output mode and return (reply, session_id).
+
+    If `--resume` fails because the session went missing (e.g. session store was
+    cleared or the id is stale from another machine), retry once without resume
+    so the caller can drop the stale mapping and start fresh.
+    """
+    proc = _run_claude_once(
+        prompt, session_id, model=model, system_prompt=system_prompt, timeout_s=timeout_s
+    )
+    if proc is None:
         return "[claude timed out]", session_id
+
+    stale_resume = (
+        proc.returncode != 0
+        and session_id is not None
+        and "No conversation found with session ID" in (proc.stderr or "")
+    )
+    if stale_resume:
+        LOG.warning("stale session=%s — retrying without --resume", session_id)
+        proc = _run_claude_once(
+            prompt, None, model=model, system_prompt=system_prompt, timeout_s=timeout_s
+        )
+        if proc is None:
+            return "[claude timed out]", None
+        session_id = None  # drop stale sid regardless of retry outcome
+
     if proc.returncode != 0:
-        LOG.error("claude exited %s stderr=%s", proc.returncode, proc.stderr[:500])
+        LOG.error("claude exited %s stderr=%s", proc.returncode, (proc.stderr or "")[:500])
         return f"[claude error rc={proc.returncode}]", session_id
+
     last_line = proc.stdout.strip().splitlines()[-1] if proc.stdout.strip() else "{}"
     try:
         data = json.loads(last_line)
@@ -94,8 +128,11 @@ def handle_poll_batch(
         reply, new_sid = claude_respond(
             text, sid, model=model, system_prompt=system_prompt
         )
-        if new_sid and new_sid != sid:
-            sessions[from_user] = new_sid
+        if new_sid != sid:
+            if new_sid:
+                sessions[from_user] = new_sid
+            else:
+                sessions.pop(from_user, None)
             save_session_map(session_path, sessions)
         try:
             account_client.send_text(

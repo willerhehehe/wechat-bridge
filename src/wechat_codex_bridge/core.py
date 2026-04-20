@@ -1,12 +1,12 @@
-"""Core bridge logic: Codex CLI invocation + per-user thread tracking + poll handling."""
+"""Bridge core: long-running codex app-server + per-user thread_id map."""
 from __future__ import annotations
 
 import json
 import logging
-import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any
+
+from .appserver import AppServerClient, AppServerError
 
 LOG = logging.getLogger("wechat_codex_bridge")
 
@@ -25,145 +25,67 @@ def save_session_map(path: Path, sessions: dict[str, str]) -> None:
     path.write_text(json.dumps(sessions, ensure_ascii=False, indent=2))
 
 
-def _build_prompt(prompt: str, thread_id: str | None, system_prompt: str | None) -> str:
-    """Prepend system instructions only on the very first turn (no thread_id yet)."""
-    if thread_id or not system_prompt:
-        return prompt
-    return f"SYSTEM INSTRUCTIONS:\n{system_prompt}\n\nUSER:\n{prompt}"
-
-
-def _run_codex_once(
-    prompt: str,
-    thread_id: str | None,
+def _ensure_thread(
+    client: AppServerClient,
+    stored_tid: str | None,
     *,
-    model: str | None,
-    timeout_s: float,
-) -> tuple[subprocess.CompletedProcess[str] | None, str, str | None]:
-    """Invoke `codex exec` (or `codex exec resume`). Returns (proc, last_msg, new_thread_id)."""
-    last_msg_file = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".txt", delete=False, encoding="utf-8"
-    )
-    last_msg_file.close()
-    last_msg_path = last_msg_file.name
+    system_prompt: str | None,
+) -> tuple[str, bool]:
+    """Resolve a thread id usable for turn/start. Returns (thread_id, is_new).
 
-    args: list[str] = ["codex", "exec"]
-    if thread_id:
-        args.append("resume")
-    args += [
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--skip-git-repo-check",
-        "--json",
-        "-o",
-        last_msg_path,
-    ]
-    if model:
-        args += ["-m", model]
-    if thread_id:
-        args.append(thread_id)
-    args.append(prompt)
-
-    LOG.info("codex run thread=%s prompt=%r", thread_id, prompt[:80])
-    try:
-        proc = subprocess.run(
-            args,
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            stdin=subprocess.DEVNULL,
-        )
-    except subprocess.TimeoutExpired:
-        _unlink_quiet(last_msg_path)
-        return None, "", None
-
-    new_thread_id = thread_id
-    for line in (proc.stdout or "").splitlines():
-        line = line.strip()
-        if not line.startswith("{"):
-            continue
+    - If we have a stored id, try thread/resume; fall back to thread/start on failure.
+    - If new, seed the thread with system instructions as the first user turn.
+    """
+    if stored_tid:
         try:
-            evt = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if evt.get("type") == "thread.started" and evt.get("thread_id"):
-            new_thread_id = str(evt["thread_id"])
-            break
-
-    try:
-        last_msg = Path(last_msg_path).read_text(encoding="utf-8")
-    except OSError:
-        last_msg = ""
-    _unlink_quiet(last_msg_path)
-    return proc, last_msg, new_thread_id
-
-
-def _unlink_quiet(path: str) -> None:
-    try:
-        Path(path).unlink()
-    except OSError:
-        pass
+            tid = client.resume_thread(stored_tid)
+            return tid, False
+        except AppServerError as e:
+            LOG.warning("resume failed for thread=%s (%s) — starting fresh", stored_tid, e)
+    tid = client.start_thread()
+    if system_prompt:
+        try:
+            client.run_turn(tid, f"SYSTEM INSTRUCTIONS:\n{system_prompt}", timeout_s=60)
+        except Exception as e:  # noqa: BLE001
+            LOG.warning("system-prompt seed turn failed: %s", e)
+    return tid, True
 
 
 def codex_respond(
+    client: AppServerClient,
     prompt: str,
-    thread_id: str | None,
+    stored_tid: str | None,
     *,
-    model: str | None,
     system_prompt: str | None,
     timeout_s: float = 300.0,
 ) -> tuple[str, str | None]:
-    """Invoke `codex exec` and return (reply, thread_id).
-
-    If `exec resume` fails (stale thread_id from prior run, wiped sessions dir,
-    etc.), retry once without resume so the caller can drop the stale mapping
-    and start fresh.
-    """
-    full_prompt = _build_prompt(prompt, thread_id, system_prompt)
-    proc, last_msg, new_tid = _run_codex_once(
-        full_prompt, thread_id, model=model, timeout_s=timeout_s
-    )
-    if proc is None:
-        return "[codex timed out]", thread_id
-
-    if proc.returncode != 0 and thread_id:
-        LOG.warning(
-            "resume failed for thread=%s rc=%s stderr=%s stdout-tail=%s — retrying without resume",
-            thread_id,
-            proc.returncode,
-            (proc.stderr or "").strip()[:300],
-            (proc.stdout or "").strip()[-300:],
-        )
-        full_prompt = _build_prompt(prompt, None, system_prompt)
-        proc, last_msg, new_tid = _run_codex_once(
-            full_prompt, None, model=model, timeout_s=timeout_s
-        )
-        if proc is None:
-            return "[codex timed out]", None
-        thread_id = None
-
-    if proc.returncode != 0:
-        LOG.error(
-            "codex exited %s stderr=%s stdout-tail=%s",
-            proc.returncode,
-            (proc.stderr or "").strip()[:500],
-            (proc.stdout or "").strip()[-500:],
-        )
-        return f"[codex error rc={proc.returncode}]", new_tid or thread_id
-
-    reply = (last_msg or "").strip() or "(no reply)"
-    return reply, new_tid or thread_id
+    """One user turn. Returns (reply, new_thread_id)."""
+    try:
+        tid, _ = _ensure_thread(client, stored_tid, system_prompt=system_prompt)
+    except AppServerError as e:
+        LOG.error("cannot obtain thread: %s", e)
+        return f"[codex init error: {e}]", stored_tid
+    try:
+        reply = client.run_turn(tid, prompt, timeout_s=timeout_s)
+    except TimeoutError:
+        return "[codex timed out]", tid
+    except AppServerError as e:
+        LOG.error("run_turn failed: %s", e)
+        return f"[codex error: {e}]", tid
+    return (reply.strip() or "(no reply)"), tid
 
 
 def handle_poll_batch(
     account_client: Any,
+    codex_client: AppServerClient,
     messages: list[dict],
     sessions: dict[str, str],
     session_path: Path,
     *,
-    model: str | None,
     system_prompt: str | None,
     allowed_users: set[str] | None = None,
 ) -> None:
-    """Consume a batch of WeChat messages: call Codex per sender, send replies back."""
+    """Consume a batch of WeChat messages: one codex turn per sender, send replies back."""
     from weixin_sdk.exceptions import WeixinError
     from weixin_sdk.messages import extract_text_body
 
@@ -178,7 +100,7 @@ def handle_poll_batch(
         LOG.info("in  from=%s text=%r", from_user, text[:120])
         tid = sessions.get(from_user)
         reply, new_tid = codex_respond(
-            text, tid, model=model, system_prompt=system_prompt
+            codex_client, text, tid, system_prompt=system_prompt
         )
         if new_tid != tid:
             if new_tid:

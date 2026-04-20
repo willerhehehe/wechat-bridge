@@ -66,13 +66,14 @@ Common flags (both bridges):
 --allowed-users u1,u2       # comma-separated from_user_id allow-list
 ```
 
-**Model selection differs between bridges:**
+**Model selection (both bridges prompt on first run and persist the choice):**
 
-- Claude bridge prompts once for the model (Opus / Sonnet / Haiku), saves it to
-  `~/.wechat-claude-bridge/config.json`, and reuses it. `--model <id>` overrides
-  and re-saves.
-- Codex bridge has no interactive picker — it uses whatever is in
-  `~/.codex/config.toml`. `--model <id>` overrides per run only.
+- Claude: picker lists Opus / Sonnet / Haiku → saved to `~/.wechat-claude-bridge/config.json`.
+- Codex: picker lists the current user-facing codex slugs (`gpt-5.4`, `gpt-5.3-codex`, `gpt-5.2-codex`, `gpt-5.2`, `gpt-5.1-codex-max`, `gpt-5.1-codex-mini`, plus "use codex default") → saved to `~/.wechat-codex-bridge/config.json`. Pick "use codex default" to fall back to `~/.codex/config.toml`.
+
+`--model <id>` overrides and re-saves.
+
+**Codex sandbox — default is `read-only`.** Because WeChat users can inject arbitrary text into codex prompts, the codex bridge defaults to `--sandbox read-only` + `--approval-policy never`: codex can reason about files under its workdir but cannot write or execute commands. Override with `--sandbox workspace-write` / `danger-full-access` if you understand the risk.
 
 `<cmd> --help` / `<cmd> run --help` for every flag.
 
@@ -82,10 +83,15 @@ Both agents expose a one-shot turn model that fits a message-bus bridge: run
 one turn per inbound WeChat message, capture the agent's conversation handle,
 resume it on the next turn.
 
-| Bridge | Subprocess | Handle | Persisted in |
-|--------|------------|--------|--------------|
-| Claude | `claude --print --output-format json [--resume <sid>]` | `session_id` (from JSON `result.session_id`) | `~/.wechat-claude-bridge/sessions.json` |
-| Codex  | `codex exec [resume <tid>] --json -o <file>` | `thread_id` (from JSONL `thread.started` event) | `~/.wechat-codex-bridge/sessions.json` |
+| Bridge | Backend | Handle | Persisted in |
+|--------|---------|--------|--------------|
+| Claude | `claude --print --output-format json [--resume <sid>]` — one subprocess per message | `session_id` (from JSON `result.session_id`) | `~/.wechat-claude-bridge/sessions.json` |
+| Codex  | `codex app-server --listen stdio://` — **one long-running process**, JSON-RPC 2.0 | `thread_id` (from `thread/start` response, one per WeChat user) | `~/.wechat-codex-bridge/sessions.json` |
+
+The codex side uses `app-server` instead of `codex exec` so we only pay the
+codex cold-start cost once. Steady-state turn latency drops from ~8-10s to
+~1-3s. On bridge restart we `thread/resume` stored thread ids; if codex
+doesn't recognize one (wiped rollouts, etc.), we fall back to `thread/start`.
 
 ```
 WeChat phone
@@ -97,12 +103,11 @@ weixin_sdk.AccountClient.poll_once()   ←── long-poll (25s)
 handle_poll_batch (per-bridge):
     for each inbound text:
       handle = sessions[from_user_id]                     # session_id or thread_id; or None
-      reply, handle' = claude --print --resume <handle>   # or: codex exec resume <handle>
+      # Claude: fork a new `claude --print` subprocess per message
+      # Codex:  reuse the long-running app-server, call thread/resume + turn/start
+      reply, handle' = <agent>.respond(text, handle)
       sessions[from_user_id] = handle'                    # persist
       acct.send_text(from_user_id, reply)
-    │
-    ▼
-claude CLI / codex CLI → respective backend → returns handle + final message
 ```
 
 Key properties:
@@ -126,12 +131,15 @@ Flags common to both bridges (`wechat-claude-bridge` / `wechat-codex-bridge`):
 | `--allowed-users` | *(empty = everyone)* | Comma-separated `from_user_id` allow-list |
 | `--log-level` | `INFO` | Python logging level |
 
-`--model` behaves differently per bridge:
+Both bridges share the same `--model` ergonomics: interactive picker on first run, saved to `~/.wechat-<agent>-bridge/config.json`, `--model <id>` overrides and re-saves. Pass `--model ""` on the codex side to fall back to `~/.codex/config.toml`.
 
-| Bridge | Behavior |
-|--------|----------|
-| Claude | Interactive picker on first run, saved to `~/.wechat-claude-bridge/config.json`; `--model <id>` overrides and re-saves. |
-| Codex  | No picker. Defaults to `~/.codex/config.toml`; `--model <id>` overrides per run only. |
+**Codex-only flags:**
+
+| Flag | Default | Purpose |
+|------|---------|---------|
+| `--sandbox` | `read-only` | codex sandbox (`read-only` / `workspace-write` / `danger-full-access`) |
+| `--approval-policy` | `never` | codex approval policy (`never` / `unlessTrusted` / `always`) |
+| `--workdir` | `~/.wechat-codex-bridge/workdir` | cwd codex threads run inside |
 
 ## Not implemented
 
@@ -156,7 +164,8 @@ wechat-bridge/
     ├── wechat_codex_bridge/
     │   ├── __init__.py
     │   ├── __main__.py                   # python -m wechat_codex_bridge
-    │   ├── cli.py                        # mirrors claude cli.py
+    │   ├── cli.py                        # argparse, subcommands (login/run)
+    │   ├── appserver.py                  # JSON-RPC client for `codex app-server`
     │   └── core.py                       # codex_respond, handle_poll_batch
     └── weixin_sdk/                       # VENDORED — see CREDITS.md, shared by both bridges
         ├── client.py

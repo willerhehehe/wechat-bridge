@@ -7,7 +7,7 @@ name = "wechat-claude-bridge"
 version = "0.1.0"
 description = "Bridge WeChat messages to Claude Code (and back). Self-contained — includes a vendored copy of the openclaw-weixin Python SDK."
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.9"
 authors = [{ name = "slock-mock" }]
 dependencies = [
   "pycryptodome>=3.20.0",

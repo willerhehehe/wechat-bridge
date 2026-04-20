@@ -12,7 +12,7 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-@dataclass(slots=True)
+@dataclass
 class AccountCredentials:
     account_id: str
     token: str
@@ -34,7 +34,7 @@ class AccountCredentials:
         )
 
 
-@dataclass(slots=True)
+@dataclass
 class LoginSession:
     session_key: str
     qrcode: str
@@ -58,14 +58,14 @@ class LoginSession:
         )
 
 
-@dataclass(slots=True)
+@dataclass
 class LoginStartResult:
     qrcode_url: str | None
     message: str
     session_key: str
 
 
-@dataclass(slots=True)
+@dataclass
 class LoginWaitResult:
     connected: bool
     message: str
@@ -85,7 +85,7 @@ class LoginWaitResult:
         }
 
 
-@dataclass(slots=True)
+@dataclass
 class PollResponse:
     ret: int | None
     errcode: int | None
@@ -121,7 +121,7 @@ class PollResponse:
         }
 
 
-@dataclass(slots=True)
+@dataclass
 class UploadedFileInfo:
     filekey: str
     download_encrypted_query_param: str

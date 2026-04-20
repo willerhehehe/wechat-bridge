@@ -1,3 +1,6 @@
+from __future__ import annotations
+
+
 class WeixinError(Exception):
     """Base exception for the extracted Weixin SDK."""
 

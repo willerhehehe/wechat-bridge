@@ -22,3 +22,4 @@ env/
 sessions.json
 .openclaw-weixin-python/
 .wechat-claude-bridge/
+.wechat-codex-bridge/

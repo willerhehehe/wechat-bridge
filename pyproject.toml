@@ -17,6 +17,8 @@ dependencies = [
 [project.scripts]
 wechat-claude-bridge = "wechat_claude_bridge.cli:main"
 wxcc = "wechat_claude_bridge.cli:main"
+wechat-codex-bridge = "wechat_codex_bridge.cli:main"
+wxcx = "wechat_codex_bridge.cli:main"
 weixin-sdk = "weixin_sdk.cli:main"
 
 [tool.setuptools]

@@ -1,8 +1,10 @@
-# wechat-claude-bridge
+# wechat-bridge
 
-Self-contained one-command bridge from WeChat to Claude Code. Polls WeChat,
-invokes `claude --print` per inbound message with a resumed session per
-sender, and sends the reply back.
+Self-contained one-command bridge from WeChat to your coding agent. Polls
+WeChat, invokes the agent CLI (`claude --print` **or** `codex exec`) per
+inbound message with a resumed session per sender, and sends the reply back.
+Pick either bridge per invocation — they share the WeChat login and account
+store, just talk to different agents.
 
 **No external dependencies on other repos** — the WeChat SDK is vendored in
 `src/weixin_sdk/`. Clone this directory, run `install.sh`, done.
@@ -17,12 +19,14 @@ cd wechat-bridge
 
 That:
 1. installs `pipx` if missing,
-2. runs `pipx install .` — which registers three CLIs globally:
-   - `wechat-claude-bridge` — the bridge (main)
-   - `wxcc` — short alias
-   - `weixin-sdk` — the lower-level vendored SDK CLI (optional, for diagnostics)
+2. runs `pipx install .` — which registers five CLIs globally:
+   - `wechat-claude-bridge` / `wxcc` — bridge to Claude Code
+   - `wechat-codex-bridge` / `wxcx` — bridge to the Codex CLI
+   - `weixin-sdk` — lower-level vendored SDK CLI (optional, for diagnostics)
 
-The Claude CLI must be on `PATH` separately: <https://claude.com/download>.
+Whichever agent CLI you plan to use must be on `PATH` separately:
+- Claude: <https://claude.com/download>
+- Codex: installed via Homebrew / the Codex installer, binary name `codex`.
 
 Re-install over an existing install: `./install.sh --upgrade`.
 
@@ -35,24 +39,53 @@ pip install .
 
 ## Use
 
+Log in once (shared by both bridges — both read the same weixin-sdk account store):
+
 ```bash
-wechat-claude-bridge login                 # prints a QR right in the terminal — scan with WeChat
-wechat-claude-bridge                       # no args: auto-use the stored account (sonnet-4-6)
-wechat-claude-bridge --model claude-opus-4-7       # switch model
-wechat-claude-bridge --allowed-users u1@im.wechat,u2@im.wechat
-wxcc                                       # short alias, same defaults
+wechat-claude-bridge login     # or: wechat-codex-bridge login — either works
 ```
 
-If you've logged in multiple bots, pass `--account-id <bot_id>` to pick one —
-the CLI lists stored accounts when it can't decide.
+Run whichever agent you want:
 
-`wechat-claude-bridge --help` / `wechat-claude-bridge run --help` for every flag.
+```bash
+# Claude bridge
+wechat-claude-bridge                       # first run: interactive model picker, then starts
+wechat-claude-bridge --model claude-opus-4-7
+wxcc                                       # short alias
+
+# Codex bridge
+wechat-codex-bridge                        # uses ~/.codex/config.toml default model
+wechat-codex-bridge --model gpt-5-codex    # per-run override
+wxcx                                       # short alias
+```
+
+Common flags (both bridges):
+
+```bash
+--account-id <id>           # omit if only one bot is stored
+--allowed-users u1,u2       # comma-separated from_user_id allow-list
+```
+
+**Model selection differs between bridges:**
+
+- Claude bridge prompts once for the model (Opus / Sonnet / Haiku), saves it to
+  `~/.wechat-claude-bridge/config.json`, and reuses it. `--model <id>` overrides
+  and re-saves.
+- Codex bridge has no interactive picker — it uses whatever is in
+  `~/.codex/config.toml`. `--model <id>` overrides per run only.
+
+`<cmd> --help` / `<cmd> run --help` for every flag.
 
 ## Design
 
-Claude Code's one-shot turn model (`claude --print --output-format json`) fits
-a message-bus bridge perfectly: run one turn per inbound message and capture
-the `session_id` to resume the same conversation on the next turn.
+Both agents expose a one-shot turn model that fits a message-bus bridge: run
+one turn per inbound WeChat message, capture the agent's conversation handle,
+resume it on the next turn.
+
+| Bridge | Subprocess | Handle | Persisted in |
+|--------|------------|--------|--------------|
+| Claude | `claude --print --output-format json [--resume <sid>]` | `session_id` (from JSON `result.session_id`) | `~/.wechat-claude-bridge/sessions.json` |
+| Codex  | `codex exec [resume <tid>] --json -o <file>` | `thread_id` (from JSONL `thread.started` event) | `~/.wechat-codex-bridge/sessions.json` |
 
 ```
 WeChat phone
@@ -61,41 +94,49 @@ WeChat phone
 weixin_sdk.AccountClient.poll_once()   ←── long-poll (25s)
     │
     ▼
-wechat_claude_bridge.core.handle_poll_batch:
+handle_poll_batch (per-bridge):
     for each inbound text:
-      sid = sessions[from_user_id]                        # or None
-      reply, sid' = claude --print --resume <sid> <text>  # subprocess
-      sessions[from_user_id] = sid'                       # persist
+      handle = sessions[from_user_id]                     # session_id or thread_id; or None
+      reply, handle' = claude --print --resume <handle>   # or: codex exec resume <handle>
+      sessions[from_user_id] = handle'                    # persist
       acct.send_text(from_user_id, reply)
-sessions map: ~/.wechat-claude-bridge/sessions.json
     │
     ▼
-claude CLI → Anthropic API → returns { result, session_id }
+claude CLI / codex CLI → respective backend → returns handle + final message
 ```
 
 Key properties:
 
-- **One Claude session per WeChat user** — coherent conversations across turns.
-- **Bridge itself is stateless** — restart freely; state is in `sessions.json` + each user's Claude session store.
-- **Model-agnostic sessions** — `--resume <sid>` works even if you switch model. Opus, Sonnet, Haiku all interoperate on the same conversation.
+- **One agent conversation per WeChat user** — coherent turns across messages.
+- **Bridge itself is stateless** — restart freely; state is in `sessions.json` + each agent's own session store.
+- **Self-healing resume** — if a stored handle is stale (agent session wiped, etc.), the bridge retries once without resume and drops the stale mapping.
 - **WeChat context token is forwarded** — preserves server-side WeChat conversation continuity.
+- **Both bridges share the WeChat account store** — log in once, run either bridge.
 
 ## Flags
+
+Flags common to both bridges (`wechat-claude-bridge` / `wechat-codex-bridge`):
 
 | Flag | Default | Purpose |
 |------|---------|---------|
 | `--account-id` | *(auto-pick if only one stored)* | weixin-sdk bot account id |
-| `--model` | `claude-sonnet-4-6` | Claude model |
-| `--session-file` | `~/.wechat-claude-bridge/sessions.json` | Per-user session map |
-| `--system-prompt` | (concise WeChat bot prompt) | Appended to Claude's system prompt |
+| `--session-file` | `~/.wechat-<agent>-bridge/sessions.json` | Per-user session/thread map |
+| `--system-prompt` | (concise WeChat bot prompt) | Prepended to the agent on the first turn |
 | `--poll-timeout-s` | `25` | WeChat long-poll timeout |
 | `--allowed-users` | *(empty = everyone)* | Comma-separated `from_user_id` allow-list |
 | `--log-level` | `INFO` | Python logging level |
 
+`--model` behaves differently per bridge:
+
+| Bridge | Behavior |
+|--------|----------|
+| Claude | Interactive picker on first run, saved to `~/.wechat-claude-bridge/config.json`; `--model <id>` overrides and re-saves. |
+| Codex  | No picker. Defaults to `~/.codex/config.toml`; `--model <id>` overrides per run only. |
+
 ## Not implemented
 
-- Media (images, voice, files, video) — `iter_media_items(msg)` is available but the bridge ignores it. Add `--image <path>` / transcription if needed.
-- Per-user concurrency cap — if ten WeChat users message simultaneously, ten `claude` subprocesses run in parallel. Add a per-user `asyncio.Lock` if that bothers you.
+- Media (images, voice, files, video) — `iter_media_items(msg)` is available but both bridges ignore it. Add `--image <path>` / transcription if needed.
+- Per-user concurrency cap — if ten WeChat users message simultaneously, ten agent subprocesses run in parallel. Add a per-user `asyncio.Lock` if that bothers you.
 - Admin interface — no runtime ops, no dashboard. It's a script.
 
 ## Layout
@@ -103,16 +144,21 @@ Key properties:
 ```
 wechat-bridge/
 ├── install.sh                            # one-command bootstrap (pipx)
-├── pyproject.toml                        # single package, three entry points
+├── pyproject.toml                        # one package, five entry points
 ├── CREDITS.md                            # attribution for vendored SDK
-├── bridge.py                             # legacy shim → package CLI
+├── bridge.py                             # legacy shim → claude bridge CLI
 └── src/
     ├── wechat_claude_bridge/
     │   ├── __init__.py
     │   ├── __main__.py                   # python -m wechat_claude_bridge
     │   ├── cli.py                        # argparse, subcommands (login/run)
     │   └── core.py                       # claude_respond, handle_poll_batch
-    └── weixin_sdk/                       # VENDORED — see CREDITS.md
+    ├── wechat_codex_bridge/
+    │   ├── __init__.py
+    │   ├── __main__.py                   # python -m wechat_codex_bridge
+    │   ├── cli.py                        # mirrors claude cli.py
+    │   └── core.py                       # codex_respond, handle_poll_batch
+    └── weixin_sdk/                       # VENDORED — see CREDITS.md, shared by both bridges
         ├── client.py
         ├── login.py
         ├── messages.py

@@ -1,8 +1,12 @@
-"""Command-line interface for wechat-claude-bridge."""
+"""Command-line interface for wechat-codex-bridge.
+
+Mirrors wechat_claude_bridge.cli, but invokes `codex exec` instead of `claude --print`.
+Model selection is delegated to codex's own `~/.codex/config.toml` — pass `--model` to
+override per-run.
+"""
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sys
 import time
@@ -11,77 +15,22 @@ from pathlib import Path
 from . import __version__
 from .core import handle_poll_batch, load_session_map
 
-LOG = logging.getLogger("wechat_claude_bridge")
-CONFIG_DIR = Path.home() / ".wechat-claude-bridge"
+LOG = logging.getLogger("wechat_codex_bridge")
+CONFIG_DIR = Path.home() / ".wechat-codex-bridge"
 DEFAULT_SESSION_FILE = CONFIG_DIR / "sessions.json"
-CONFIG_FILE = CONFIG_DIR / "config.json"
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful assistant replying on WeChat. "
     "Keep replies concise (about one short paragraph, plain text, no markdown)."
 )
-DEFAULT_MODEL = "claude-sonnet-4-6"
-MODEL_CHOICES = [
-    ("claude-opus-4-7", "Opus 4.7 — most capable, slowest, most expensive"),
-    ("claude-sonnet-4-6", "Sonnet 4.6 — balanced (default)"),
-    ("claude-haiku-4-5", "Haiku 4.5 — fastest & cheapest"),
-]
-
-
-def _load_config() -> dict:
-    if not CONFIG_FILE.exists():
-        return {}
-    try:
-        return json.loads(CONFIG_FILE.read_text())
-    except Exception:
-        return {}
-
-
-def _save_config(config: dict) -> None:
-    CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_FILE.write_text(json.dumps(config, ensure_ascii=False, indent=2))
-
-
-def _prompt_for_model() -> str:
-    print("Which Claude model should the bridge use?")
-    for idx, (model_id, desc) in enumerate(MODEL_CHOICES, 1):
-        print(f"  [{idx}] {model_id}  — {desc}")
-    while True:
-        raw = input(f"choice [1-{len(MODEL_CHOICES)}, default 2]: ").strip() or "2"
-        if raw.isdigit() and 1 <= int(raw) <= len(MODEL_CHOICES):
-            return MODEL_CHOICES[int(raw) - 1][0]
-        print(f"please enter a number 1-{len(MODEL_CHOICES)}")
-
-
-def _resolve_model(provided: str | None) -> str:
-    """Pick the Claude model: CLI flag > saved config > interactive prompt > default."""
-    config = _load_config()
-    if provided:
-        if config.get("model") != provided:
-            config["model"] = provided
-            _save_config(config)
-        return provided
-    saved = config.get("model")
-    if isinstance(saved, str) and saved:
-        LOG.info("using model=%s (from %s)", saved, CONFIG_FILE)
-        return saved
-    if not sys.stdin.isatty():
-        return DEFAULT_MODEL
-    chosen = _prompt_for_model()
-    config["model"] = chosen
-    _save_config(config)
-    print(f"saved to {CONFIG_FILE} — re-run without --model to reuse, or pass --model to override")
-    return chosen
 
 
 def cmd_login(_args: argparse.Namespace) -> int:
-    """Delegate to `weixin-sdk login` so users don't need to know about it."""
+    """Delegate to `weixin-sdk login`."""
     try:
         from weixin_sdk.cli import main as weixin_main
     except ImportError:
         print(
-            "weixin_sdk not installed. Install with:\n"
-            "  pipx inject wechat-claude-bridge openclaw-weixin-python\n"
-            "or re-run install.sh.",
+            "weixin_sdk not installed. Re-run install.sh.",
             file=sys.stderr,
         )
         return 1
@@ -89,10 +38,6 @@ def cmd_login(_args: argparse.Namespace) -> int:
 
 
 def _resolve_account_id(provided: str | None) -> str | None:
-    """If the user didn't pass --account-id, auto-pick the sole stored account.
-
-    Returns the resolved id, or None (caller prints the error) if ambiguous or empty.
-    """
     if provided:
         return provided
     try:
@@ -105,7 +50,7 @@ def _resolve_account_id(provided: str | None) -> str | None:
         return accounts[0].account_id
     if not accounts:
         print(
-            "No WeChat account stored. Run `wechat-claude-bridge login` first.",
+            "No WeChat account stored. Run `wechat-codex-bridge login` first.",
             file=sys.stderr,
         )
         return None
@@ -121,20 +66,18 @@ def cmd_run(args: argparse.Namespace) -> int:
         from weixin_sdk.exceptions import WeixinApiError, WeixinError
     except ImportError as e:
         print(f"weixin_sdk not available: {e}", file=sys.stderr)
-        print("run `wechat-claude-bridge login` first (re-run install.sh if needed).", file=sys.stderr)
         return 1
 
     account_id = _resolve_account_id(args.account_id)
     if not account_id:
         return 1
     args.account_id = account_id
-    args.model = _resolve_model(args.model)
 
     try:
         acct = AccountClient.from_store(account_id)
     except WeixinError as e:
         LOG.error("account load failed: %s", e)
-        LOG.error("run `wechat-claude-bridge login` first")
+        LOG.error("run `wechat-codex-bridge login` first")
         return 1
 
     session_path = Path(args.session_file)
@@ -144,7 +87,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         "bridge ready account=%s user=%s model=%s%s",
         args.account_id,
         acct.credentials.user_id,
-        args.model,
+        args.model or "(codex default)",
         f" allowed={len(allowed)}" if allowed else "",
     )
 
@@ -152,7 +95,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         try:
             poll = acct.poll_once(timeout_s=args.poll_timeout_s)
         except WeixinApiError as e:
-            LOG.error("session expired: %s — re-run `wechat-claude-bridge login`", e)
+            LOG.error("session expired: %s — re-run `wechat-codex-bridge login`", e)
             return 1
         except KeyboardInterrupt:
             LOG.info("interrupted, exiting")
@@ -176,8 +119,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
-        prog="wechat-claude-bridge",
-        description="Bridge WeChat messages to Claude Code (and back).",
+        prog="wechat-codex-bridge",
+        description="Bridge WeChat messages to the Codex CLI (and back).",
     )
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     p.add_argument("--log-level", default="INFO", help="Python logging level (default: INFO)")
@@ -195,12 +138,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub_run.add_argument(
         "--model",
         default=None,
-        help="Claude model (omit on first run → interactive pick, saved to ~/.wechat-claude-bridge/config.json)",
+        help="Override codex model per run (otherwise uses ~/.codex/config.toml default)",
     )
     sub_run.add_argument(
         "--session-file",
         default=str(DEFAULT_SESSION_FILE),
-        help=f"Per-user Claude session map (default: {DEFAULT_SESSION_FILE})",
+        help=f"Per-user Codex thread map (default: {DEFAULT_SESSION_FILE})",
     )
     sub_run.add_argument("--system-prompt", default=DEFAULT_SYSTEM_PROMPT)
     sub_run.add_argument("--poll-timeout-s", type=float, default=25.0)
@@ -215,8 +158,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
-    # Default to `run` when no subcommand is given (including bare invocation)
-    # and --help/--version isn't requested.
     if not argv or argv[0] not in {"login", "run", "-h", "--help", "--version"}:
         argv = ["run", *argv]
 

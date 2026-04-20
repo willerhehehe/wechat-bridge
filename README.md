@@ -73,7 +73,7 @@ Common flags (both bridges):
 
 `--model <id>` overrides and re-saves.
 
-**Codex sandbox — default is `read-only`.** Because WeChat users can inject arbitrary text into codex prompts, the codex bridge defaults to `--sandbox read-only` + `--approval-policy never`: codex can reason about files under its workdir but cannot write or execute commands. Override with `--sandbox workspace-write` / `danger-full-access` if you understand the risk.
+**Codex sandbox — default is `danger-full-access`.** Codex gets its full agent toolset (read/write/execute) so it behaves like `codex` on your own terminal. If you expose the bridge to untrusted WeChat users, tighten with `--sandbox read-only` or `--sandbox workspace-write` — anything a user types lands in codex's prompt verbatim, so full access means they can ask codex to run shell commands on the host.
 
 `<cmd> --help` / `<cmd> run --help` for every flag.
 
@@ -137,7 +137,7 @@ Both bridges share the same `--model` ergonomics: interactive picker on first ru
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--sandbox` | `read-only` | codex sandbox (`read-only` / `workspace-write` / `danger-full-access`) |
+| `--sandbox` | `danger-full-access` | codex sandbox (`read-only` / `workspace-write` / `danger-full-access`) |
 | `--approval-policy` | `never` | codex approval policy (`never` / `unlessTrusted` / `always`) |
 | `--workdir` | `~/.wechat-codex-bridge/workdir` | cwd codex threads run inside |
 

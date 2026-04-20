@@ -37,7 +37,7 @@ MODEL_CHOICES = [
 ]
 SANDBOX_CHOICES = ("read-only", "workspace-write", "danger-full-access")
 APPROVAL_CHOICES = ("never", "unlessTrusted", "always")
-DEFAULT_SANDBOX = "read-only"
+DEFAULT_SANDBOX = "danger-full-access"
 DEFAULT_APPROVAL = "never"
 
 
@@ -229,9 +229,9 @@ def build_parser() -> argparse.ArgumentParser:
         choices=SANDBOX_CHOICES,
         default=DEFAULT_SANDBOX,
         help=(
-            "codex sandbox mode. read-only (default, safe) lets codex read the workdir but "
-            "not execute commands or write files. Use workspace-write / danger-full-access "
-            "only if you understand the risk of a WeChat user injecting shell commands."
+            "codex sandbox mode. Default danger-full-access gives codex full agent "
+            "capabilities; tighten to read-only or workspace-write if WeChat users are "
+            "untrusted (codex will still receive their text verbatim)."
         ),
     )
     sub_run.add_argument(

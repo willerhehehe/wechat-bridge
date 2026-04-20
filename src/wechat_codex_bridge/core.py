@@ -126,9 +126,11 @@ def codex_respond(
 
     if proc.returncode != 0 and thread_id:
         LOG.warning(
-            "resume failed for thread=%s (stderr=%s) — retrying without resume",
+            "resume failed for thread=%s rc=%s stderr=%s stdout-tail=%s — retrying without resume",
             thread_id,
-            (proc.stderr or "")[:200],
+            proc.returncode,
+            (proc.stderr or "").strip()[:300],
+            (proc.stdout or "").strip()[-300:],
         )
         full_prompt = _build_prompt(prompt, None, system_prompt)
         proc, last_msg, new_tid = _run_codex_once(
@@ -139,7 +141,12 @@ def codex_respond(
         thread_id = None
 
     if proc.returncode != 0:
-        LOG.error("codex exited %s stderr=%s", proc.returncode, (proc.stderr or "")[:500])
+        LOG.error(
+            "codex exited %s stderr=%s stdout-tail=%s",
+            proc.returncode,
+            (proc.stderr or "").strip()[:500],
+            (proc.stdout or "").strip()[-500:],
+        )
         return f"[codex error rc={proc.returncode}]", new_tid or thread_id
 
     reply = (last_msg or "").strip() or "(no reply)"
